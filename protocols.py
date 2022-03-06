@@ -6,12 +6,14 @@ from exceptions import InvalidHandshake, InvalidHeader, FrameError, ValidationEr
 import base64
 import hashlib
 import sys
-
+import secrets
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class WebsocketProtocol(asyncio.Protocol):
+    is_client = False
+
     def __init__(self):
         self.loop = asyncio.get_event_loop()
         self._reader = asyncio.StreamReader(loop=self.loop)
@@ -37,7 +39,7 @@ class WebsocketProtocol(asyncio.Protocol):
     async def read_message(self):
         try:
             while True:
-                message = await self.read_frame(self._reader)
+                message = await self.read_frame()
                 if not message and self._reader.at_eof():
                     break
                 self.messages.put_nowait(message)
@@ -47,12 +49,22 @@ class WebsocketProtocol(asyncio.Protocol):
         except Exception as err:
             raise ValidationError(f'read_message WebsocketProtocol error: {err}') from err
 
-    async def read_frame(self, stream):
-        frame = await Frame.deserialize(stream)
-        print(frame)
-        if frame.fin and frame.opcode == 'TEXT':
-            return frame.payload.decode()
-        print('opcode:', frame.opcode)
+    async def read_frame(self):
+        while True:
+            frame = await Frame.deserialize(self._reader)
+            print(frame)
+            if frame.fin and frame.opcode == 'TEXT':
+                return frame.payload.decode()
+            elif frame.opcode == 'PING':
+                await self.pong(frame.payload)
+
+    async def pong(self, payload):
+        await self.write(True, 0x0A, payload)
+
+    async def write(self, fin, opcode, payload):
+        frame = Frame(fin, opcode, payload)
+        data = await frame.serialize(self.is_client)
+        self.transport.write(data)
 
     def data_received(self, data: bytes) -> None:
         self._reader.feed_data(data)
@@ -89,7 +101,7 @@ class WebsocketServerProtocol(WebsocketProtocol):
             raise InvalidHandshake(f"receive Invalid HTTP handshake {err}")
 
         self.check_headers(headers)
-        self.write_response(headers['Sec-WebSocket-Key'])
+        self.write_http_response(headers['Sec-WebSocket-Key'])
         self.start_connections()
 
     def check_headers(self, headers):
@@ -107,7 +119,7 @@ class WebsocketServerProtocol(WebsocketProtocol):
             raise InvalidHeader("Sec-WebSocket-Version invalid version")
         # check Sec-WebSocket-Protocol
 
-    def write_response(self, key):
+    def write_http_response(self, key):
         rsp_header = (
             'HTTP/1.1 101 Switching Protocols\r\n'
             'Upgrade: websocket\r\n'
@@ -127,23 +139,30 @@ class WebsocketServerProtocol(WebsocketProtocol):
 
 class FrameParser():
     MASK_KEY_LENGTH = 4
+    FIN_BINARY = 0b10000000
+    RSV1_BINARY = 0b01000000
+    RSV2_BINARY = 0b00100000
+    RSV3_BINARY = 0b00010000
+    OPCODE_BINARY = 0b00001111
+    IS_MASK_BINARY = 0b10000000
+    LENGTH_BINARY = 0b01111111
 
     def parse_fin(self, data: int):
-        return True if data & 0b10000000 else False
+        return True if data & self.FIN_BINARY else False
 
     def parse_rsv(self, data: int):
-        return (True if data & 0b01000000 else False,
-                True if data & 0b00100000 else False,
-                True if data & 0b00010000 else False)
+        return (True if data & self.RSV1_BINARY else False,
+                True if data & self.RSV2_BINARY else False,
+                True if data & self.RSV3_BINARY else False)
 
     def parse_opcode(self, data: int):
-        return data & 0b00001111
+        return data & self.OPCODE_BINARY
 
     def parse_mask(self, data: int):
-        return True if data & 0b10000000 else False
+        return True if data & self.IS_MASK_BINARY else False
 
     async def parse_length(self, stream, data: int):
-        length = data & 0b01111111
+        length = data & self.LENGTH_BINARY
         if length == 126:
             byte = await stream.readexactly(2)
             (length,) = struct.unpack('!H', byte)
@@ -160,10 +179,10 @@ class FrameParser():
 
         payload_byte = await stream.readexactly(data_length)
         if is_mask:
-            return self._mask(mask_key_byte, payload_byte)
+            return self.mask(mask_key_byte, payload_byte)
         return payload_byte
 
-    def _mask(self, key, payload) -> bytes:
+    def mask(self, key, payload) -> bytes:
         extended_key = self._extend_mask_by_payload(key, len(payload))
         key_decimal = int.from_bytes(extended_key, byteorder=sys.byteorder)
         payload_decimal = int.from_bytes(payload, byteorder=sys.byteorder)
@@ -186,7 +205,7 @@ class Frame():
         0x0A: 'PONG',
     }
 
-    def __init__(self, fin, rsv1, rsv2, rsv3, opcode, payload):
+    def __init__(self, fin, opcode, payload, rsv1=False, rsv2=False, rsv3=False):
         self.fin = fin
         self.rsv1 = rsv1
         self.rsv2 = rsv2
@@ -195,8 +214,8 @@ class Frame():
         self.payload = payload
 
     def __repr__(self) -> str:
-        return f'FIN:{self.fin}, rsv1~3:{self.rsv1}-{self.rsv2}-{self.rsv3}, \
-                 opcode:{self.opcode}, payload:{self.payload}'
+        return (f'FIN:{self.fin}, rsv1~3:{self.rsv1}-{self.rsv2}-{self.rsv3},'
+                f'opcode:{self.opcode}, payload:{self.payload}')
 
     @property
     def opcode(self):
@@ -221,7 +240,34 @@ class Frame():
             data_length=length,
             is_mask=is_mask
         )
-        return cls(fin, rsv1, rsv2, rsv3, opcode, payload_byte)
+        return cls(fin, opcode, payload_byte, rsv1, rsv2, rsv3)
+
+    async def serialize(self, mask):
+        data = bytearray()
+        byte1 = (
+            (parser.FIN_BINARY if self.fin else 0) |
+            (parser.RSV1_BINARY if self.rsv1 else 0) |
+            (parser.RSV2_BINARY if self.rsv2 else 0) |
+            (parser.RSV3_BINARY if self.rsv3 else 0) |
+            self._opcode
+        )
+        byte2 = parser.IS_MASK_BINARY if mask else 0
+
+        length = len(self.payload)
+        if length < 126:
+            data.extend(struct.pack('!BB', byte1, byte2 | length))
+        elif length < 65536:
+            data.extend(struct.pack('!BBH', byte1, byte2 | 126, length))
+        else:
+            data.extend(struct.pack('!BBQ', byte1, byte2 | 127, length))
+
+        if mask:
+            mask_key = secrets.token_bytes(4)
+            data.extend(mask_key)
+            data.extend(parser.mask(self.payload, mask_key))
+        else:
+            data.extend(self.payload)
+        return bytes(data)
 
 
 def sign_key(key):
