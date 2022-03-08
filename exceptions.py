@@ -22,4 +22,8 @@ class FrameError(WebsocketException):
 class ValidationError(WebsocketException):
     code = 50004
     message = 'validate error'
-    
+
+
+class InvalidCloseFrame(FrameError):
+    code = 50005
+    message = 'invalid close frame'

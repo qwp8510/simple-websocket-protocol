@@ -2,7 +2,7 @@ import asyncio
 import logging
 import struct
 from https import read_http
-from exceptions import InvalidHandshake, InvalidHeader, FrameError, ValidationError
+from exceptions import InvalidHandshake, InvalidHeader, FrameError, ValidationError, InvalidCloseFrame
 import base64
 import hashlib
 import sys
@@ -57,9 +57,27 @@ class WebsocketProtocol(asyncio.Protocol):
                 return frame.payload.decode()
             elif frame.opcode == 'PING':
                 await self.pong(frame.payload)
+            elif frame.opcode == 'CLOSE':
+                await self.write_close(frame.payload)
 
     async def pong(self, payload):
         await self.write(True, 0x0A, payload)
+
+    async def write_close(self, payload):
+        if len(payload) >= 2:
+            # first two bytes must be status code
+            status_code = struct.unpack('!H', payload[:2])
+            reason = payload[2:].decode('utf-8')
+            data = payload
+        elif len(payload) == 0:
+            status_code, reason = 1005, ''
+            data = struct.pack('!H', status_code) + reason.encode('utf-8')
+        else:
+            raise InvalidCloseFrame('invalid length of close frame payload')
+
+        # TODO: defin checking statuscode
+        await self.write(True, 0x08, data)
+        self.transport.close()
 
     async def write(self, fin, opcode, payload):
         frame = Frame(fin, opcode, payload)
