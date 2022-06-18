@@ -6,7 +6,8 @@ from protocols import WebsocketServerProtocol
 
 async def handler(ws_server: WebsocketServerProtocol):
     async for data in ws_server.recv():
-        print('in handler', data)
+        print('hanler reveive:', data)
+        await ws_server.send(f'server has received your message: {data}')
 
 
 class Serve():

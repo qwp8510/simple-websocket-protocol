@@ -7,22 +7,25 @@ import base64
 import hashlib
 import sys
 import secrets
+from streams import ReaderProtocol
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-class WebsocketProtocol(asyncio.Protocol):
+class WebsocketProtocol(ReaderProtocol):
     is_client = False
 
     def __init__(self):
-        self.loop = asyncio.get_event_loop()
-        self._reader = asyncio.StreamReader(loop=self.loop)
+        super().__init__()
         self.messages = asyncio.Queue()
 
-    def connection_made(self, transport: asyncio.transports.BaseTransport) -> None:
-        # transport.set_write_buffer_limits(2 ** 16)
-        self.transport = transport
-        self._reader.set_transport(transport)
+    def data_received(self, data: bytes) -> None:
+        """allow us reading data by hight level api StreamReader"""
+        self._reader.feed_data(data)
+
+    def eof_received(self) -> None:
+        """Close the transport after receiving EOF."""
+        self._reader.feed_eof()
 
     def start_connections(self):
         asyncio.create_task(self.read_message())
@@ -36,6 +39,11 @@ class WebsocketProtocol(asyncio.Protocol):
         except Exception as err:
             raise ValidationError(f'recv WebsocketProtocol error: {err}') from err
 
+    async def send(self, message):
+        # TODO: support binary data
+        await self.write(False, 0x01, message.encode('utf-8'))
+        await self.write(True, 0x00, b'')  # final fragment
+
     async def read_message(self):
         try:
             while True:
@@ -44,6 +52,9 @@ class WebsocketProtocol(asyncio.Protocol):
                     break
                 self.messages.put_nowait(message)
 
+        except EOFError as err:
+            # TODO: handle IncompleteReadError unexpected close exception
+            pass
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -52,7 +63,6 @@ class WebsocketProtocol(asyncio.Protocol):
     async def read_frame(self):
         while True:
             frame = await Frame.deserialize(self._reader)
-            print(frame)
             if frame.fin and frame.opcode == 'TEXT':
                 return frame.payload.decode()
             elif frame.opcode == 'PING':
@@ -79,17 +89,13 @@ class WebsocketProtocol(asyncio.Protocol):
         await self.write(True, 0x08, data)
         self.transport.close()
 
+    def close(self):
+        self.transport.close()
+
     async def write(self, fin, opcode, payload):
         frame = Frame(fin, opcode, payload)
         data = await frame.serialize(self.is_client)
         self.transport.write(data)
-
-    def data_received(self, data: bytes) -> None:
-        self._reader.feed_data(data)
-
-    def eof_received(self) -> None:
-        """Close the transport after receiving EOF."""
-        self._reader.feed_eof()
 
 
 class WebsocketServerProtocol(WebsocketProtocol):
@@ -147,12 +153,9 @@ class WebsocketServerProtocol(WebsocketProtocol):
         )
         self.transport.write(rsp_header.encode('utf-8'))
 
-    def close(self):
-        self.transport.close()
-
     def connection_lost(self, exc: Exception) -> None:
         """websocket connection close"""
-        print('exc:', exc)
+        self._reader.feed_eof()
 
 
 class FrameParser():

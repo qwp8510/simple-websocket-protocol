@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <title></title>
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" href="">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    </head>
+    <body>
+        <div>
+            <textarea id="content"></textarea>
+            <div>
+                <a href="javascript:send()">send</a>
+            </div>
+            <p>receive:</p>
+            <div id="receiver" style="border-style: solid;">
+            </div>
+        </div>
+        <script type="text/javascript">
+            var socket = new WebSocket("ws://localhost:6633");
+
+            socket.addEventListener('open', function (event) {
+                socket.send('connected');
+            });
+
+            // Listen for messages
+            socket.addEventListener('message', function (event) {
+                $('#receiver').append(
+                    `<div>${event.data}</div>`
+                )
+                console.log('Message from server ', event);
+            });
+            // ws.onopen = function() {
+            //     // Web Socket 已连接上，使用 send() 方法发送数据
+            //     ws.send("发送数据");
+            //     console.log("start");
+            // };  
+
+            // ws.onmessage = function (evt)  { 
+            //     var received_msg = evt.data;
+            //     console.log("数据已接收...", evt);
+            // };
+
+            // ws.onclose = function() { 
+            //     // 关闭 websocket
+            //     console.log("连接已关闭..."); 
+            // };
+
+            function send() {
+                socket.send($('#content').val());
+                $('#content').val('');
+            }
+        </script>
+    </body>
+</html>
