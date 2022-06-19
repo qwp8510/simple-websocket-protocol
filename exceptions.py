@@ -27,3 +27,8 @@ class ValidationError(WebsocketException):
 class InvalidCloseFrame(FrameError):
     code = 50005
     message = 'invalid close frame'
+
+
+class ConnectionClosed():
+    code = 50006
+    meesage = 'connection closed'

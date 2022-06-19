@@ -2,7 +2,8 @@ import asyncio
 import logging
 import struct
 from https import read_http
-from exceptions import InvalidHandshake, InvalidHeader, FrameError, ValidationError, InvalidCloseFrame
+from exceptions import InvalidHandshake, InvalidHeader, FrameError, ValidationError, InvalidCloseFrame, \
+    ConnectionClosed
 import base64
 import hashlib
 import sys
@@ -48,7 +49,7 @@ class WebsocketProtocol(ReaderProtocol):
         try:
             while True:
                 message = await self.read_frame()
-                if not message and self._reader.at_eof():
+                if not message:
                     break
                 self.messages.put_nowait(message)
 
@@ -59,6 +60,8 @@ class WebsocketProtocol(ReaderProtocol):
             raise
         except Exception as err:
             raise ValidationError(f'read_message WebsocketProtocol error: {err}') from err
+        finally:
+            self.close_transfer()
 
     async def read_frame(self):
         while True:
@@ -69,6 +72,7 @@ class WebsocketProtocol(ReaderProtocol):
                 await self.pong(frame.payload)
             elif frame.opcode == 'CLOSE':
                 await self.write_close(frame.payload)
+                return
 
     async def pong(self, payload):
         await self.write(True, 0x0A, payload)
@@ -87,9 +91,8 @@ class WebsocketProtocol(ReaderProtocol):
 
         # TODO: defin checking statuscode
         await self.write(True, 0x08, data)
-        self.transport.close()
 
-    def close(self):
+    def close_transfer(self):
         self.transport.close()
 
     async def write(self, fin, opcode, payload):
@@ -97,23 +100,32 @@ class WebsocketProtocol(ReaderProtocol):
         data = await frame.serialize(self.is_client)
         self.transport.write(data)
 
+    def connection_lost(self, exc: Exception) -> None:
+        """websocket connection close"""
+        self._reader.feed_eof()
 
 class WebsocketServerProtocol(WebsocketProtocol):
     def __init__(self, handler):
         super().__init__()
         self.handler = handler
+        self.handler_task: asyncio.Task[None]
 
     def connection_made(self, transport: asyncio.transports.BaseTransport) -> None:
         super().connection_made(transport)
-        _ = asyncio.create_task(self.new_handler())
+        self.handler_task = asyncio.create_task(self.new_handler())
 
     async def new_handler(self):
         try:
             await self.handshake()
-        except asyncio.CancelledError:  # pragma: no cover
+        except asyncio.CancelledError:
             raise
 
-        await self.handler(self)
+        try:
+            await self.handler(self)
+        except asyncio.CancelledError as err:
+            if err == 'connectionClosed':
+                raise ConnectionClosed()
+            raise err
 
     async def handshake(self):
         """websocket initially handshake by http get request"""
@@ -153,9 +165,9 @@ class WebsocketServerProtocol(WebsocketProtocol):
         )
         self.transport.write(rsp_header.encode('utf-8'))
 
-    def connection_lost(self, exc: Exception) -> None:
-        """websocket connection close"""
-        self._reader.feed_eof()
+    def close_transfer(self):
+        self.handler_task.cancel('connectionClosed')
+        super().close_transfer()
 
 
 class FrameParser():
