@@ -21,7 +21,7 @@ class WebsocketProtocol(ReaderProtocol):
         self.messages = asyncio.Queue()
 
     def data_received(self, data: bytes) -> None:
-        """allow us reading data by hight level api StreamReader"""
+        """allow us reading data by StreamReader"""
         self._reader.feed_data(data)
 
     def eof_received(self) -> None:
